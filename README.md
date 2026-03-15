@@ -24,6 +24,15 @@
 - **Implement**：将改编后的模块，转化为一个可执行的推理结构（Reasoning Structure）
 - **Execute**：使用该推理结构，一步步推导并得出最终答案
 
+本仓库还包含一个 **LATS (Language Agent Tree Search)** 范式的 agent（基于 LangGraph）：
+
+- **Select**：使用 UCT 算法在搜索树中选择最值得探索的节点
+- **Expand**：在选中节点上，结合反思记忆，LLM 生成多个候选动作
+- **Evaluate**：LLM Critic 对候选动作进行启发式评分
+- **Simulate**：将最优动作投入真实环境执行，获取真实反馈
+- **Backpropagate**：根据结果回溯更新整棵树的 MCTS 统计信息
+- **Reflect**：失败时生成文字反思，注入后续搜索避免重复犯错
+
 ## 1) 安装与运行
 
 ```bash
@@ -71,6 +80,12 @@ python -m llm_compiler_langgraph.cli
 
 ```bash
 python -m self_discover_langgraph.cli
+```
+
+运行 LATS 交互式 CLI：
+
+```bash
+python -m lats_langgraph.cli
 ```
 
 ## 2) 已挂载工具（你怎么问会触发）
@@ -305,6 +320,79 @@ python -m self_discover_langgraph.cli
 请问：农场里每种动物各有多少只（头）？
 ```
 
+## 3.7) LATS 使用说明
+
+### 什么是 LATS？
+
+LATS（Language Agent Tree Search）是一种将 **蒙特卡洛树搜索（MCTS）** 与 **LLM** 深度融合的 agent 框架（参考 [NeurIPS 2023 论文](https://arxiv.org/abs/2310.04406)）。它不是简单地把 MCTS 套在 LLM 上，而是针对语言模型的特性，将传统 MCTS 魔改为包含 **Select → Expand → Evaluate → Simulate → Backpropagate → Reflect** 的六步精密循环。
+
+### 核心思想
+
+LATS 的每一次搜索迭代，都在一棵以初始状态为根节点的树上执行六个步骤：
+
+1. **Select（选择）**：采用 UCT 算法从根节点出发，沿着最值得探索的路径深入
+   $$UCT_i = V_i + c \cdot \sqrt{\frac{\ln N}{n_i}}$$
+   兼顾 Exploitation（利用已知高价值路径）和 Exploration（探索未知分支）
+
+2. **Expand（扩展）**：在选中节点上，结合反思记忆，LLM 生成 $k$ 个不同的候选动作（头脑风暴）
+
+3. **Evaluate（评估）**：LLM Critic 对每个候选动作打分（0.0 ~ 1.0），替代传统 MCTS 的 Rollout
+
+4. **Simulate（仿真）**：将最优动作投入真实环境（工具调用）执行，获取真实反馈（Observation）
+
+5. **Backpropagate（回溯）**：将 Reward 沿路径回传，更新所有祖先节点的访问次数和价值期望
+
+6. **Reflect（反思）**：失败时，LLM 分析失败轨迹生成反思文本，存入全局记忆池，防止在同一个坑里跌倒两次
+
+### 与其他框架的区别
+
+| 范式 | 搜索策略 | 错误恢复 | 适用场景 |
+|------|----------|----------|----------|
+| ReWOO | 线性计划 | 无（一次性执行） | 简单任务，步骤明确 |
+| Plan & Execute | 顺序执行 + 动态重规划 | Replanner 调整计划 | 需要灵活应对的任务 |
+| LLM Compiler | DAG 拓扑排序 + 并行 | 局部容错重规划 | 多分支、可并行的复杂任务 |
+| Self-Discover | 元推理 | 无 | 纯逻辑推理 |
+| **LATS** | **MCTS 树搜索** | **反思记忆 + UCT 自动避坑** | **需要试错探索的复杂任务** |
+
+### LATS 配置选项
+
+```bash
+# 搜索预算（最大 MCTS 迭代轮数，默认 8）
+# 在 CLI 中默认为 8 轮；可在代码中通过 create_initial_state(question, max_budget=N) 调整
+
+# 每轮扩展的候选动作数（默认 3）
+# 搜索树最大深度（默认 6）
+```
+
+### 日志输出说明
+
+LATS 输出详细日志，包括：
+
+- `[select]` — UCT 节点选择
+- `[expand]` — LLM Generator 候选动作生成
+- `[evaluate]` — LLM Critic 评分
+- `[simulate]` — 工具执行 / 推理执行
+- `[backprop]` — MCTS 回溯更新
+- `[reflect]` — 失败轨迹反思
+- `[router]` — 搜索继续/终止决策
+
+### LATS 适用场景
+
+LATS 最适合**解题路径不唯一、可能走入死胡同**的探索性任务。与 ReWOO（线性计划一次执行）不同，LATS 会主动尝试多条路径，失败后反思避坑，通过 UCT 逐步收敛到最优策略。
+
+**适合 LATS 的任务特征**：
+- 需要从多个角度检查/分析，无法提前确定最优切入点
+- 中间步骤可能失败或走偏，需要回溯换路
+- 最终答案需要综合多轮探索的发现
+
+### LATS 示例问题
+
+```bash
+python -m lats_langgraph.cli
+> 这个项目里有没有潜在的安全漏洞？检查代码中的敏感信息处理、输入验证和文件访问控制
+> 分析这个项目的架构设计，找出最大的技术债务，并给出重构优先级建议
+```
+
 ## 4) 代码结构
 
 - `src/rewoo_langgraph/agent.py`：LangGraph 主流程（Plan→Act→Solve）
@@ -324,6 +412,11 @@ python -m self_discover_langgraph.cli
 - `src/self_discover_langgraph/agent.py`：Self-Discover 主流程（Select→Adapt→Implement→Execute）
 - `src/self_discover_langgraph/prompts.py`：预定义的推理模块
 - `src/self_discover_langgraph/cli.py`：命令行入口
+
+- `src/lats_langgraph/agent.py`：LATS 主流程（六步 MCTS 循环：Select→Expand→Evaluate→Simulate→Backpropagate→Reflect）
+- `src/lats_langgraph/prompts.py`：Generator/Critic/Reflect 提示词
+- `src/lats_langgraph/tools.py`：LATS 工具集
+- `src/lats_langgraph/cli.py`：命令行入口
 
 ## 5) FAQ
 
